@@ -277,20 +277,27 @@ def build_folium_map(sol, dark_mode=False):
     center_lat = demand_nodes["lat"].mean()
     center_lon = demand_nodes["lon"].mean()
 
-    # OpenStreetMap tiles (standard light vs dark CSS-filtered basemap)
+    # Always use reliable 100% free OpenStreetMap tiles
+    m = folium.Map(
+        location=[center_lat, center_lon],
+        zoom_start=9,
+        tiles="OpenStreetMap",
+    )
+
+    # In dark mode, inject CSS to render the OpenStreetMap tiles in dark mode
+    # without relying on external tile servers that burn watermarks
     if dark_mode:
-        m = folium.Map(
-            location=[center_lat, center_lon],
-            zoom_start=9,
-            tiles="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png",
-            attr="&copy; OpenStreetMap contributors &copy; CARTO",
-        )
-    else:
-        m = folium.Map(
-            location=[center_lat, center_lon],
-            zoom_start=9,
-            tiles="OpenStreetMap",
-        )
+        dark_css = """
+        <style>
+            .leaflet-tile {
+                filter: brightness(0.6) invert(1) contrast(3) hue-rotate(200deg) saturate(0.3) brightness(0.7) !important;
+            }
+            .leaflet-container {
+                background: #0e1117 !important;
+            }
+        </style>
+        """
+        m.get_root().html.add_child(folium.Element(dark_css))
 
     colors = [
         "#e6194b", "#3cb44b", "#4363d8", "#f58231", "#911eb4",
