@@ -131,7 +131,7 @@ def build_network_data(n_customers: int, n_candidates: int, seed: int = RNG_SEED
                 candidates.loc[j, "lat"], candidates.loc[j, "lon"],
             )
 
-    return demand_nodes, candidates, d
+    return demand_nodes, candidates, d, sample_df
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -371,10 +371,102 @@ def build_folium_map(sol, dark_mode=False):
     return m
 
 
+def build_coverage_map(sol, sample_customers_df, max_dist_km, dark_mode=False):
+    """
+    Builds a coverage map displaying:
+      - Translucent service area radius (max_dist_km) around each open dark store
+      - Individual customer locations rendered as tiny dots (downsampled up to 2,000 for smooth WebGL rendering)
+      - Opened dark stores with distinct color tags
+    """
+    candidates = sol["candidates"]
+    opened = sol["opened"]
+
+    center_lat = candidates.loc[opened, "lat"].mean() if opened else candidates["lat"].mean()
+    center_lon = candidates.loc[opened, "lon"].mean() if opened else candidates["lon"].mean()
+
+    m = folium.Map(
+        location=[center_lat, center_lon],
+        zoom_start=9,
+        tiles="OpenStreetMap",
+    )
+
+    if dark_mode:
+        dark_css = """
+        <style>
+            .leaflet-tile {
+                filter: brightness(0.6) invert(1) contrast(3) hue-rotate(200deg) saturate(0.3) brightness(0.7) !important;
+            }
+            .leaflet-container {
+                background: #0e1117 !important;
+            }
+        </style>
+        """
+        m.get_root().html.add_child(folium.Element(dark_css))
+
+    colors = [
+        "#e6194b", "#3cb44b", "#4363d8", "#f58231", "#911eb4",
+        "#42d4f4", "#f032e6", "#bfef45", "#fabed4", "#469990",
+        "#dcbeff", "#9A6324", "#800000", "#aaffc3", "#808000",
+        "#ffd8b1", "#000075", "#a9a9a9", "#ffe119", "#000000",
+    ]
+    store_color = {j: colors[idx % len(colors)] for idx, j in enumerate(opened)}
+
+    # 1. Plot individual customer pings as tiny dots
+    # Downsample to at most 2,500 points for browser performance
+    display_pings = sample_customers_df
+    if len(display_pings) > 2500:
+        display_pings = display_pings.sample(n=2500, random_state=42)
+
+    dot_color = "#61afef" if dark_mode else "#0055ff"
+    for _, crow in display_pings.iterrows():
+        folium.CircleMarker(
+            location=[crow["lat"], crow["long"]],
+            radius=2.0,
+            color=dot_color,
+            fill=True,
+            fill_color=dot_color,
+            fill_opacity=0.45,
+            weight=0,
+            tooltip=f"Customer Ping (demand: {crow['demand']:.1f})",
+        ).add_to(m)
+
+    # 2. Draw coverage zones (circle of radius max_dist_km) around each open store
+    for j in opened:
+        row = candidates.loc[j]
+        color = store_color[j]
+
+        # Service coverage circle (radius in meters)
+        folium.Circle(
+            location=[row["lat"], row["lon"]],
+            radius=float(max_dist_km * 1000.0),
+            color=color,
+            weight=1.5,
+            fill=True,
+            fill_color=color,
+            fill_opacity=0.15,
+            tooltip=f"<b>Store {j} Coverage Zone</b> (Radius: {max_dist_km:.1f} km)",
+        ).add_to(m)
+
+        # Store icon
+        folium.Marker(
+            location=[row["lat"], row["lon"]],
+            icon=folium.Icon(color="red", icon="shopping-cart", prefix="fa"),
+            tooltip=(
+                f"<b>Opened Dark Store {j}</b><br>"
+                f"Coverage Radius: {max_dist_km:.1f} km<br>"
+                f"Capacity: {row['capacity']} orders/day<br>"
+                f"Served: {row['served_demand']:.0f} orders/day<br>"
+                f"Utilisation: {row['utilisation_pct']:.1f}%"
+            ),
+        ).add_to(m)
+
+    return m
+
+
 @st.cache_data(show_spinner=False)
 def compute_tradeoff(n_customers, n_candidates, max_dist_km, revenue_per_order, transport_rate, k_values, seed=RNG_SEED):
     """Computes net profit for each maximum allowed store count k."""
-    demand_nodes, candidates, d = build_network_data(n_customers, n_candidates, seed)
+    demand_nodes, candidates, d, _ = build_network_data(n_customers, n_candidates, seed)
     results = []
     for k in k_values:
         _, sol = solve_milp(demand_nodes, candidates, d, max_dist_km, revenue_per_order=revenue_per_order, transport_rate=transport_rate, max_open=k)
@@ -568,7 +660,7 @@ tab1, tab2 = st.tabs(["🔍 Optimisation Results", "📈 Trade-off Plot"])
 
 with tab1:
     with st.spinner("Clustering customer pings & solving MILP..."):
-        demand_nodes, candidates, d = build_network_data(n_customers, n_candidates)
+        demand_nodes, candidates, d, sample_customers_df = build_network_data(n_customers, n_candidates)
         status_str, sol = solve_milp(demand_nodes, candidates, d, max_dist_km, revenue_per_order=revenue_per_order, transport_rate=transport_rate)
 
     if sol is None or sol["n_stores"] == 0:
@@ -596,8 +688,26 @@ with tab1:
         st.dataframe(opened_df, use_container_width=True)
 
         st.subheader("2️⃣ Network Solution on Map")
-        st.caption("🔴 Red Marker = Opened Dark Store | ◾ Black Diamond = Unopened Candidate | 🔵 Circle = Demand Node")
-        folium_map = build_folium_map(sol, dark_mode=dark_mode)
+        
+        # Interactive map selection
+        map_mode = st.radio(
+            "Choose Map View:",
+            options=[
+                "🕸️ Demand Network & Assignment Lines (Clustered Nodes)",
+                "⭕ Store Service Coverage Zones & Customer Dots (Raw Pings)",
+            ],
+            index=0,
+            horizontal=True,
+            help="Switch between the assignment network graph and the catchment coverage circles view",
+        )
+
+        if map_mode == "🕸️ Demand Network & Assignment Lines (Clustered Nodes)":
+            st.caption("🔴 Red Marker = Opened Dark Store | ◾ Black Diamond = Unopened Candidate | 🔵 Circle = Demand Node | Lines = Fulfilment flows")
+            folium_map = build_folium_map(sol, dark_mode=dark_mode)
+        else:
+            st.caption(f"🔴 Red Marker = Opened Dark Store | ⭕ Translucent Zone = Service Radius ({max_dist_km:.1f} km) | 🔹 Tiny Dots = Individual Customers")
+            folium_map = build_coverage_map(sol, sample_customers_df, max_dist_km, dark_mode=dark_mode)
+
         st_folium(folium_map, width="100%", height=550)
 
 with tab2:
