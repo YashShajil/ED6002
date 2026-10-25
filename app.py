@@ -277,9 +277,20 @@ def build_folium_map(sol, dark_mode=False):
     center_lat = demand_nodes["lat"].mean()
     center_lon = demand_nodes["lon"].mean()
 
-    # In dark mode, use CartoDB dark_matter tiles; otherwise standard OpenStreetMap
-    tile_layer = "CartoDB dark_matter" if dark_mode else "OpenStreetMap"
-    m = folium.Map(location=[center_lat, center_lon], zoom_start=9, tiles=tile_layer)
+    # OpenStreetMap tiles (standard light vs dark CSS-filtered basemap)
+    if dark_mode:
+        m = folium.Map(
+            location=[center_lat, center_lon],
+            zoom_start=9,
+            tiles="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png",
+            attr="&copy; OpenStreetMap contributors &copy; CARTO",
+        )
+    else:
+        m = folium.Map(
+            location=[center_lat, center_lon],
+            zoom_start=9,
+            tiles="OpenStreetMap",
+        )
 
     colors = [
         "#e6194b", "#3cb44b", "#4363d8", "#f58231", "#911eb4",
@@ -418,29 +429,77 @@ with st.expander("📖 Problem Background, Capacity Decision & Formulation", exp
 
 # ─── Sidebar Controls ────────────────────────────────────────────────────────
 st.sidebar.header("🎨 Appearance")
-dark_mode = st.sidebar.toggle("🌙 Dark Mode", value=False, help="Toggle dark theme for charts and maps")
+theme_choice = st.sidebar.radio(
+    "Select Theme:",
+    options=["☀️ Light Mode", "🌙 Dark Mode"],
+    index=0,
+    horizontal=True,
+    help="Switch between Light and Dark mode styling",
+)
+dark_mode = (theme_choice == "🌙 Dark Mode")
 
 if dark_mode:
-    # Inject CSS for dark theme in main app container
+    # Explicit CSS for complete dark mode styling
     st.markdown("""
         <style>
             .stApp {
-                background-color: #0e1117;
-                color: #fafafa;
+                background-color: #0e1117 !important;
+                color: #e6edf3 !important;
+            }
+            header[data-testid="stHeader"] {
+                background-color: #0e1117 !important;
             }
             [data-testid="stSidebar"] {
-                background-color: #161b22;
+                background-color: #161b22 !important;
+                color: #e6edf3 !important;
+            }
+            [data-testid="stSidebar"] * {
+                color: #e6edf3 !important;
             }
             [data-testid="stMetricValue"] {
                 color: #58a6ff !important;
             }
-            [data-testid="stDataFrame"] {
-                background-color: #161b22;
+            [data-testid="stMetricLabel"] {
+                color: #8b949e !important;
+            }
+            .stDataFrame {
+                background-color: #161b22 !important;
+            }
+            p, h1, h2, h3, h4, span, label {
+                color: #e6edf3 !important;
             }
         </style>
     """, unsafe_allow_html=True)
     plt.style.use("dark_background")
 else:
+    # Explicit CSS for clean light mode styling
+    st.markdown("""
+        <style>
+            .stApp {
+                background-color: #ffffff !important;
+                color: #1a1a1a !important;
+            }
+            header[data-testid="stHeader"] {
+                background-color: #ffffff !important;
+            }
+            [data-testid="stSidebar"] {
+                background-color: #f8f9fa !important;
+                color: #1a1a1a !important;
+            }
+            [data-testid="stSidebar"] * {
+                color: #1a1a1a !important;
+            }
+            [data-testid="stMetricValue"] {
+                color: #0969da !important;
+            }
+            [data-testid="stMetricLabel"] {
+                color: #57606a !important;
+            }
+            p, h1, h2, h3, h4, span, label {
+                color: #1a1a1a !important;
+            }
+        </style>
+    """, unsafe_allow_html=True)
     plt.style.use("default")
 
 st.sidebar.header("⚙️ Network Inputs")
