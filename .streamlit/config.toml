@@ -1,9 +1,7 @@
-[theme]
-primaryColor = "#4363d8"
-backgroundColor = "#ffffff"
-secondaryBackgroundColor = "#f0f2f6"
-textColor = "#262730"
-font = "sans serif"
+# Streamlit configuration
+# Setting theme to 'system' allows Streamlit's built-in Settings menu
+# (hamburger / three-dots icon -> Settings -> Theme) to toggle between Light and Dark mode,
+# or match the operating system theme automatically.
 
 [server]
 headless = true

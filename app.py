@@ -268,8 +268,8 @@ def build_kpi_table(sol):
     return pd.DataFrame(kpis, columns=["Key Performance Indicator", "Value"])
 
 
-def build_folium_map(sol):
-    """Build an interactive Folium OpenStreetMap showing the network solution."""
+def build_folium_map(sol, dark_mode=False):
+    """Build an interactive Folium map showing the network solution."""
     demand_nodes = sol["demand_nodes"]
     candidates = sol["candidates"]
     opened = sol["opened"]
@@ -277,7 +277,9 @@ def build_folium_map(sol):
     center_lat = demand_nodes["lat"].mean()
     center_lon = demand_nodes["lon"].mean()
 
-    m = folium.Map(location=[center_lat, center_lon], zoom_start=9, tiles="OpenStreetMap")
+    # In dark mode, use CartoDB dark_matter tiles; otherwise standard OpenStreetMap
+    tile_layer = "CartoDB dark_matter" if dark_mode else "OpenStreetMap"
+    m = folium.Map(location=[center_lat, center_lon], zoom_start=9, tiles=tile_layer)
 
     colors = [
         "#e6194b", "#3cb44b", "#4363d8", "#f58231", "#911eb4",
@@ -415,6 +417,32 @@ with st.expander("📖 Problem Background, Capacity Decision & Formulation", exp
     """)
 
 # ─── Sidebar Controls ────────────────────────────────────────────────────────
+st.sidebar.header("🎨 Appearance")
+dark_mode = st.sidebar.toggle("🌙 Dark Mode", value=False, help="Toggle dark theme for charts and maps")
+
+if dark_mode:
+    # Inject CSS for dark theme in main app container
+    st.markdown("""
+        <style>
+            .stApp {
+                background-color: #0e1117;
+                color: #fafafa;
+            }
+            [data-testid="stSidebar"] {
+                background-color: #161b22;
+            }
+            [data-testid="stMetricValue"] {
+                color: #58a6ff !important;
+            }
+            [data-testid="stDataFrame"] {
+                background-color: #161b22;
+            }
+        </style>
+    """, unsafe_allow_html=True)
+    plt.style.use("dark_background")
+else:
+    plt.style.use("default")
+
 st.sidebar.header("⚙️ Network Inputs")
 
 n_customers = st.sidebar.slider(
@@ -503,7 +531,7 @@ with tab1:
 
         st.subheader("2️⃣ Network Solution on Map")
         st.caption("🔴 Red Marker = Opened Dark Store | ◾ Black Diamond = Unopened Candidate | 🔵 Circle = Demand Node")
-        folium_map = build_folium_map(sol)
+        folium_map = build_folium_map(sol, dark_mode=dark_mode)
         st_folium(folium_map, width="100%", height=550)
 
 with tab2:
