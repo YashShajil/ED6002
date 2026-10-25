@@ -6,12 +6,9 @@ Dark Store Location Optimisation – Streamlit App
 Enhanced MILP model with:
   • Maximum-distance constraint between dark store and customer (d_ij <= max_dist)
   • Real UP / Varanasi customer data loaded directly from 'AI for DS Sample Data.csv'
-  • Interactive Streamlit UI with inputs for:
-      - number of customers (sampled from CSV up to 20,999)
-      - number of candidate dark-store sites
-      - maximum allowed distance (km)
+  • Interactive Streamlit UI with configurable economic parameters (Revenue, Transport rate)
   • Results:
-      1. KPIs in a table
+      1. KPIs in a table (Revenue, Transport Cost, Fixed Cost, Net Profit)
       2. Detailed solution on an interactive OpenStreetMap (no API key required)
       3. Trade-off plot: Profit vs. allowed dark stores (k in {2, 5, 10, 20, 25})
          for 10,000 customers and 50 candidate locations.
@@ -33,13 +30,9 @@ from ortools.linear_solver import pywraplp
 RNG_SEED = 42
 DATA_FILE = os.path.join(os.path.dirname(__file__), "AI for DS Sample Data.csv")
 
-REVENUE_PER_ORDER = 80.0        # Rs. per order delivered
-TRANSPORT_COST_PER_KM = 12.0    # Rs. per km per order (last-mile delivery)
-
 FIXED_COST_BASE = 3500.0        # Rs./day base fixed cost of opening a dark store
 FIXED_COST_PER_CAPACITY = 2.2   # Rs./day per unit of capacity
 FIXED_COST_NOISE = 0.10         # +/-10% realistic variation in rent/costs
-
 OUTLIER_LOW_Q, OUTLIER_HIGH_Q = 0.01, 0.99
 
 
@@ -78,7 +71,7 @@ def haversine_km(lat1, lon1, lat2, lon2):
 def build_network_data(n_customers: int, n_candidates: int, seed: int = RNG_SEED):
     """
     Subsamples n_customers from the cleaned CSV, clusters them into demand nodes,
-    and proposes n_candidates candidate dark-store sites.
+    and proposes n_candidates candidate dark-store sites with demand-proportional capacities.
     """
     clean_df = load_clean_dataset()
     n_sample = min(n_customers, len(clean_df))
@@ -112,9 +105,10 @@ def build_network_data(n_customers: int, n_candidates: int, seed: int = RNG_SEED
 
     total_demand = demand_nodes["demand"].sum()
 
-    # 3. Derive store capacities
+    # 3. Derive store capacities:
+    # Sized so that opening subsets of stores (e.g. k=5, 10, 25) can handle demand
     raw_cap = candidates["local_demand"].clip(lower=1)
-    base_cap = (total_demand / max(2, n_candidates * 0.35))
+    base_cap = (total_demand / max(2, n_candidates * 0.30))
     candidates["capacity"] = (
         base_cap * (0.8 + 0.6 * (raw_cap - raw_cap.min()) / (raw_cap.max() - raw_cap.min() + 1e-9))
     ).round().astype(int)
@@ -143,7 +137,7 @@ def build_network_data(n_customers: int, n_candidates: int, seed: int = RNG_SEED
 # ─────────────────────────────────────────────────────────────────────────────
 # MILP OPTIMIZATION MODEL
 # ─────────────────────────────────────────────────────────────────────────────
-def solve_milp(demand_nodes, candidates, d, max_dist_km, max_open=None):
+def solve_milp(demand_nodes, candidates, d, max_dist_km, revenue_per_order=80.0, transport_rate=1.5, max_open=None):
     """
     Solves the Capacitated Facility Location Problem with a Maximum Distance Constraint.
     """
@@ -163,7 +157,7 @@ def solve_milp(demand_nodes, candidates, d, max_dist_km, max_open=None):
     # Decision variables
     y = {j: solver.BoolVar(f"y_{j}") for j in J}
     x = {(i, j): solver.NumVar(0.0, infinity, f"x_{i}_{j}") for i in I for j in J}
-    u = {i: solver.NumVar(0.0, infinity, f"u_{i}") for i in I}
+    u = {i: solver.NumVar(0.0, infinity, f"u_{i}") for i in I}  # Unserved demand slack
 
     # Constraint 1: Demand satisfaction (with unserved slack variable)
     for i in I:
@@ -183,10 +177,10 @@ def solve_milp(demand_nodes, candidates, d, max_dist_km, max_open=None):
     if max_open is not None:
         solver.Add(sum(y[j] for j in J) <= max_open)
 
-    # High penalty on unserved demand ensures the model serves maximum reachable demand
+    # Penalty on unserved demand ensures the model serves all reachable demand
     UNSERVED_PENALTY = 500.0
 
-    transport_cost_expr = sum(TRANSPORT_COST_PER_KM * d[i, j] * x[i, j] for i in I for j in J)
+    transport_cost_expr = sum(transport_rate * d[i, j] * x[i, j] for i in I for j in J)
     fixed_cost_expr = sum(F[j] * y[j] for j in J)
     unserved_penalty_expr = sum(UNSERVED_PENALTY * u[i] for i in I)
 
@@ -209,11 +203,11 @@ def solve_milp(demand_nodes, candidates, d, max_dist_km, max_open=None):
 
     total_served = flows_df["flow"].sum() if not flows_df.empty else 0.0
     total_transport_cost = float(
-        flows_df.apply(lambda r: TRANSPORT_COST_PER_KM * d[int(r.i), int(r.j)] * r.flow, axis=1).sum()
+        flows_df.apply(lambda r: transport_rate * d[int(r.i), int(r.j)] * r.flow, axis=1).sum()
     ) if not flows_df.empty else 0.0
     
     total_fixed_cost = float(candidates.loc[opened, "fixed_cost"].sum()) if opened else 0.0
-    total_revenue = float(total_served * REVENUE_PER_ORDER)
+    total_revenue = float(total_served * revenue_per_order)
     profit = total_revenue - total_transport_cost - total_fixed_cost
 
     utilisation = flows_df.groupby("j")["flow"].sum().reindex(opened).fillna(0) if not flows_df.empty else pd.Series(0, index=opened)
@@ -268,7 +262,7 @@ def build_kpi_table(sol):
         ("Transport (Delivery) Cost", f"₹ {sol['total_transport_cost']:,.0f}"),
         ("Fixed Operating Cost", f"₹ {sol['total_fixed_cost']:,.0f}"),
         ("Total Daily Cost", f"₹ {sol['total_transport_cost'] + sol['total_fixed_cost']:,.0f}"),
-        ("Net Profit", f"₹ {sol['profit']:,.0f} / day"),
+        ("Net Profit", f"₹ {sol['profit']:,.0f} / day (₹ {sol['profit']/1e5:.2f} Lakhs)"),
         ("Solver Status", sol["status"]),
     ]
     return pd.DataFrame(kpis, columns=["Key Performance Indicator", "Value"])
@@ -283,7 +277,6 @@ def build_folium_map(sol):
     center_lat = demand_nodes["lat"].mean()
     center_lon = demand_nodes["lon"].mean()
 
-    # Use standard OpenStreetMap (NO API KEY REQUIRED)
     m = folium.Map(location=[center_lat, center_lon], zoom_start=9, tiles="OpenStreetMap")
 
     colors = [
@@ -359,12 +352,12 @@ def build_folium_map(sol):
 
 
 @st.cache_data(show_spinner=False)
-def compute_tradeoff(n_customers, n_candidates, max_dist_km, k_values, seed=RNG_SEED):
+def compute_tradeoff(n_customers, n_candidates, max_dist_km, revenue_per_order, transport_rate, k_values, seed=RNG_SEED):
     """Computes net profit for each maximum allowed store count k."""
     demand_nodes, candidates, d = build_network_data(n_customers, n_candidates, seed)
     results = []
     for k in k_values:
-        _, sol = solve_milp(demand_nodes, candidates, d, max_dist_km, max_open=k)
+        _, sol = solve_milp(demand_nodes, candidates, d, max_dist_km, revenue_per_order=revenue_per_order, transport_rate=transport_rate, max_open=k)
         if sol is not None:
             results.append({
                 "max_open": k,
@@ -400,13 +393,15 @@ st.caption(
 clean_dataset = load_clean_dataset()
 total_rows_csv = len(clean_dataset)
 
-with st.expander("📖 Problem Background & Mathematical Formulation", expanded=False):
+with st.expander("📖 Problem Background, Capacity Decision & Formulation", expanded=False):
     st.markdown(f"""
-    ### Problem Overview
-    - **Dataset:** `AI for DS Sample Data.csv` ({total_rows_csv:,} customer demand pings across Eastern Uttar Pradesh).
-    - **Optimization Problem:** Capacitated Facility Location Problem (CFLP) with an added **maximum allowable distance constraint**.
+    ### 1. How Store Capacities are Decided
+    - **Candidate Locations ($J$):** Proposed at dense customer demand hot-spots using **Weighted K-Means Clustering**.
+    - **Capacity Sizing ($C_j$):** Sites located in denser, higher-demand clusters are assigned higher daily capacity, while suburban/sparse locations receive smaller capacity.
+    - **Fixed Operating Cost ($F_j$):** Larger stores carry higher fixed costs due to rent, staff, and storage:
+      $$F_j = (\\text{{Base Cost ₹3,500}} + 2.2 \\times C_j) \\times (1 \\pm 10\\%)$$
 
-    ### Mathematical Formulation
+    ### 2. Mathematical Formulation
     $$\\min \\sum_{{i \\in I}} \\sum_{{j \\in J}} c \\cdot d_{{ij}} \\cdot x_{{ij}} + \\sum_{{j \\in J}} F_j \\cdot y_j + \\text{{Penalty}} \\cdot \\sum_{{i \\in I}} u_i$$
 
     **Subject to:**
@@ -417,16 +412,10 @@ with st.expander("📖 Problem Background & Mathematical Formulation", expanded=
        *No customer can be served from a dark store farther than $d_{{\\max}}$ km.*
     4. **Store Budget Limit (Trade-off Analysis):** $\\sum_{{j \\in J}} y_j \\le k$
     5. **Binary & Non-negativity:** $y_j \\in \\{{0,1\\}}, \\; x_{{ij}} \\ge 0, \\; u_i \\ge 0$
-
-    ### Parameters & Assumptions
-    - **Revenue:** ₹80 per delivered order.
-    - **Transport Cost Rate:** ₹12 per km per order.
-    - **Store Fixed Cost:** Base ₹3,500/day + ₹2.2 per unit capacity.
-    - **Tile Layer:** OpenStreetMap (100% open source, no API key required).
     """)
 
 # ─── Sidebar Controls ────────────────────────────────────────────────────────
-st.sidebar.header("⚙️ Model Inputs")
+st.sidebar.header("⚙️ Network Inputs")
 
 n_customers = st.sidebar.slider(
     "Number of Customers (sampled from CSV)",
@@ -450,9 +439,29 @@ max_dist_km = st.sidebar.slider(
     "Maximum Allowable Distance (km)",
     min_value=5.0,
     max_value=60.0,
-    value=25.0,
+    value=30.0,
     step=2.5,
     help="Maximum distance constraint between any customer and their fulfilling dark store",
+)
+
+st.sidebar.header("💰 Economic Parameters")
+
+revenue_per_order = st.sidebar.number_input(
+    "Revenue per Order (₹)",
+    min_value=40.0,
+    max_value=300.0,
+    value=100.0,
+    step=5.0,
+    help="Average revenue generated per delivered order",
+)
+
+transport_rate = st.sidebar.number_input(
+    "Transport Cost Rate (₹/km/order)",
+    min_value=0.5,
+    max_value=15.0,
+    value=1.5,
+    step=0.25,
+    help="Per-km delivery cost per order (course benchmark ~1.0 - 2.0)",
 )
 
 st.sidebar.markdown("---")
@@ -466,7 +475,7 @@ tab1, tab2 = st.tabs(["🔍 Optimisation Results", "📈 Trade-off Plot"])
 with tab1:
     with st.spinner("Clustering customer pings & solving MILP..."):
         demand_nodes, candidates, d = build_network_data(n_customers, n_candidates)
-        status_str, sol = solve_milp(demand_nodes, candidates, d, max_dist_km)
+        status_str, sol = solve_milp(demand_nodes, candidates, d, max_dist_km, revenue_per_order=revenue_per_order, transport_rate=transport_rate)
 
     if sol is None or sol["n_stores"] == 0:
         st.error(
@@ -478,7 +487,7 @@ with tab1:
         c1.metric("Stores Opened", f"{sol['n_stores']} / {sol['n_candidates']}")
         c2.metric("Daily Revenue", f"₹{sol['total_revenue']:,.0f}")
         c3.metric("Total Daily Cost", f"₹{sol['total_transport_cost'] + sol['total_fixed_cost']:,.0f}")
-        c4.metric("Net Daily Profit", f"₹{sol['profit']:,.0f}")
+        c4.metric("Net Daily Profit", f"₹{sol['profit']:,.0f}", f"₹{sol['profit']/1e5:.2f} Lakhs")
 
         st.subheader("1️⃣ KPI Summary Table")
         st.dataframe(build_kpi_table(sol), use_container_width=True, hide_index=True)
@@ -511,6 +520,8 @@ with tab2:
                 n_customers=10000,
                 n_candidates=50,
                 max_dist_km=max_dist_km,
+                revenue_per_order=revenue_per_order,
+                transport_rate=transport_rate,
                 k_values=k_values,
             )
 
@@ -522,14 +533,14 @@ with tab2:
         if not valid.empty:
             fig, ax = plt.subplots(figsize=(9, 4.5))
             x_vals = valid["max_open"].astype(float).to_numpy()
-            y_vals = (valid["profit"].astype(float) / 1e6).to_numpy()
+            y_vals = (valid["profit"].astype(float) / 1e5).to_numpy()  # in Lakhs
 
             ax.plot(x_vals, y_vals, marker="o", linewidth=2.5, color="#1f77b4", markersize=8)
             ax.fill_between(x_vals, 0, y_vals, alpha=0.15, color="#1f77b4")
 
             for x, y in zip(x_vals, y_vals):
                 ax.annotate(
-                    f"₹{y:.2f}M",
+                    f"₹{y:.2f}L",
                     (x, y),
                     textcoords="offset points",
                     xytext=(0, 10),
@@ -539,7 +550,7 @@ with tab2:
                 )
 
             ax.set_xlabel("Maximum Number of Dark Stores Allowed to Open (k)", fontsize=11)
-            ax.set_ylabel("Daily Net Profit (₹ Millions)", fontsize=11)
+            ax.set_ylabel("Daily Net Profit (₹ Lakhs)", fontsize=11)
             ax.set_title(
                 f"Profit vs. Allowed Dark Stores Trade-off\n(10,000 customers, 50 candidates, max dist = {max_dist_km} km)",
                 fontsize=12,
